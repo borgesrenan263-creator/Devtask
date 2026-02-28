@@ -1,0 +1,231 @@
+// src/main.js (SEM JSX) - UI do Agente
+import "./style.css";
+
+const API_BASE = (location.hostname === "localhost" || location.hostname === "127.0.0.1")
+  ? "http://127.0.0.1:8787"
+  : `http://${location.hostname}:8787`;
+
+function $(sel) {
+  return document.querySelector(sel);
+}
+
+function log(msg, type = "ok") {
+  const box = $("#log");
+  if (!box) return;
+  const t = new Date().toLocaleTimeString();
+  const line = document.createElement("div");
+  line.className = `log-${type}`;
+  line.textContent = `[${t}] ${msg}`;
+  box.prepend(line);
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign(
+    { "Content-Type": "application/json" },
+    opts.headers || {}
+  );
+
+  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+
+  if (!res.ok) {
+    const msg = data?.error || data?.message || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function renderApp() {
+  const app = document.getElementById("app");
+  if (!app) return;
+
+  app.innerHTML = `
+    <div class="wrap">
+      <h1>🤖 Controle de Agente de IA</h1>
+
+      <div class="card">
+        <div class="row">
+          <button id="btnHealth">Saúde</button>
+          <input id="cmd" placeholder="Digite um comando... ex: pwd" />
+          <button id="btnRun">Executar</button>
+          <span id="statusDot" class="status off"></span>
+        </div>
+        <div id="log" class="logbox"></div>
+      </div>
+
+      <h2>🧠 Agente Automático (Tarefas)</h2>
+
+      <div class="card">
+        <input id="tName" placeholder="Nome da tarefa (ex: monitor)" />
+        <input id="tCmd" placeholder="Comando (ex: pwd)" />
+        <input id="tInterval" placeholder="Intervalo seg (ex: 10)" inputmode="numeric" />
+        <label class="checkrow">
+          <input id="tAutostart" type="checkbox" />
+          <span>Auto-start (iniciar sozinho ao ligar)</span>
+        </label>
+
+        <div class="row">
+          <button id="btnCreate">Criar</button>
+          <button id="btnList">Listar</button>
+        </div>
+      </div>
+
+      <div id="tasks"></div>
+
+      <div class="foot">
+        API: <span id="apiUrl"></span>
+      </div>
+    </div>
+  `;
+
+  $("#apiUrl").textContent = API_BASE;
+}
+
+async function health() {
+  try {
+    const r = await api("/health");
+    $("#statusDot").className = "status on";
+    log(`OK saúde: porta=${r.port ?? 8787}`, "ok");
+  } catch (e) {
+    $("#statusDot").className = "status off";
+    log(`ERRO saúde: ${e.message}`, "err");
+  }
+}
+
+async function runCmd() {
+  const cmd = ($("#cmd")?.value || "").trim();
+  if (!cmd) return log("Digite um comando.", "err");
+
+  try {
+    const r = await api("/run", {
+      method: "POST",
+      body: JSON.stringify({ cmd }),
+    });
+    log(`EXECUTE "${cmd}" -> ${(r.stdout || "(sem saída)").trim()}`, "ok");
+    if (r.stderr) log(String(r.stderr).trim(), "err");
+  } catch (e) {
+    log(`ERRO run: ${e.message}`, "err");
+  }
+}
+
+function taskCard(t) {
+  const last = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString() : "-";
+  const status = t.running ? "🟢 RODANDO" : "🔴 PARADO";
+  const out = (t.lastStdout || "-").toString();
+
+  return `
+    <div class="card task">
+      <div><b>ID:</b> ${t.id}</div>
+      <div><b>comando:</b> ${escapeHtml(t.cmd)}</div>
+      <div><b>a cada:</b> ${t.interval}s</div>
+      <div><b>status:</b> ${status}</div>
+      <div><b>último:</b> ${last}</div>
+      <div><b>saída:</b><pre>${escapeHtml(out)}</pre></div>
+      <div class="row">
+        <button data-act="start" data-id="${t.id}">Começar</button>
+        <button data-act="stop" data-id="${t.id}">Parar</button>
+        <button data-act="del" data-id="${t.id}">Excluir</button>
+      </div>
+    </div>
+  `;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+async function refreshTasks() {
+  try {
+    const r = await api("/tasks");
+    const box = $("#tasks");
+    box.innerHTML = (r.tasks || []).map(taskCard).join("") || `<div class="muted">Sem tarefas.</div>`;
+  } catch (e) {
+    log(`ERRO listar: ${e.message}`, "err");
+  }
+}
+
+async function createTask() {
+  const name = ($("#tName")?.value || "").trim() || "Tarefa";
+  const cmd = ($("#tCmd")?.value || "").trim();
+  const interval = Number(($("#tInterval")?.value || "").trim());
+
+  const autostart = !!$("#tAutostart")?.checked;
+
+  if (!cmd) return log("Informe o comando da tarefa.", "err");
+  if (!Number.isFinite(interval) || interval <= 0) return log("Intervalo inválido (ex: 10).", "err");
+
+  try {
+    const r = await api("/tasks", {
+      method: "POST",
+      body: JSON.stringify({ name, cmd, interval, autostart }),
+    });
+    log(`OK task criada: id=${r.task?.id ?? r.id ?? "?"}`, "ok");
+    await refreshTasks();
+  } catch (e) {
+    log(`Erro criar: ${e.message}`, "err");
+  }
+}
+
+async function startTask(id) {
+  try {
+    await api(`/tasks/${id}/start`, { method: "POST" });
+    log(`OK iniciar ${id}`, "ok");
+    await refreshTasks();
+  } catch (e) {
+    log(`ERRO iniciar: ${e.message}`, "err");
+  }
+}
+
+async function stopTask(id) {
+  try {
+    await api(`/tasks/${id}/stop`, { method: "POST" });
+    log(`OK parar ${id}`, "ok");
+    await refreshTasks();
+  } catch (e) {
+    log(`ERRO parar: ${e.message}`, "err");
+  }
+}
+
+async function delTask(id) {
+  try {
+    await api(`/tasks/${id}`, { method: "DELETE" });
+    log(`OK delete ${id}`, "ok");
+    await refreshTasks();
+  } catch (e) {
+    log(`ERRO delete: ${e.message}`, "err");
+  }
+}
+
+function bindEvents() {
+  $("#btnHealth").onclick = health;
+  $("#btnRun").onclick = runCmd;
+  $("#btnCreate").onclick = createTask;
+  $("#btnList").onclick = refreshTasks;
+
+  // ações dos cards
+  document.body.addEventListener("click", (ev) => {
+    const el = ev.target;
+    if (!(el instanceof HTMLElement)) return;
+    const act = el.getAttribute("data-act");
+    const id = el.getAttribute("data-id");
+    if (!act || !id) return;
+
+    if (act === "start") startTask(id);
+    if (act === "stop") stopTask(id);
+    if (act === "del") delTask(id);
+  });
+
+  // auto refresh leve
+  setInterval(refreshTasks, 3000);
+}
+
+renderApp();
+bindEvents();
+health();
+refreshTasks();
+log("Interface pronta.", "ok");

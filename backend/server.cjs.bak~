@@ -1,0 +1,197 @@
+// ~/ai-agent/backend/server.js
+// Backend do Agente: /health (GET) e /run (POST)
+// - CORS liberado (para acessar do navegador/telefone)
+// - Autenticação via header x-agent-token
+// - Execução de comandos com whitelist (mais seguro)
+
+const http = require("http");
+const { exec } = require("child_process");
+
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
+
+// Troque se quiser, mas mantenha igual ao TOKEN do frontend (src/main.js)
+const TOKEN = process.env.AGENT_TOKEN || "dev-token";
+
+// Segurança: só permite estes comandos (pode adicionar mais depois)
+const ALLOWED = new Set([
+  "ls",
+  "ls -la",
+  "pwd",
+  "whoami",
+  "date",
+  "uname -a",
+  "node -v",
+  "npm -v",
+  "termux-info",
+  "df -h",
+  "free -h",
+]);
+
+function json(res, statusCode, obj) {
+  const body = JSON.stringify(obj, null, 2);
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+function text(res, statusCode, msg) {
+  res.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(msg);
+}
+
+function withCors(res) {
+  // CORS para permitir o front (Vite) chamar o backend
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-agent-token");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+}
+
+function runCommand(cmd) {
+  return new Promise((resolve) => {
+    // timeout para não travar
+    exec(
+      cmd,
+      {
+        timeout: 8000,
+        maxBuffer: 1024 * 1024,
+        env: process.env,
+      },
+      (error, stdout, stderr) => {
+        resolve({
+          code: error && typeof error.code === "number" ? error.code : 0,
+          stdout: stdout || "",
+          stderr: (stderr || "") + (error ? `\n${error.message}` : ""),
+        });
+      }
+    );
+  });
+}
+
+const server = http.createServer((req, res) => {
+  withCors(res);
+
+  // Preflight CORS
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Health
+  if (req.method === "GET" && req.url === "/health") {
+    return json(res, 200, {
+      ok: true,
+      workspace: process.env.HOME,
+      node: process.version,
+      port: PORT,
+      allowed: Array.from(ALLOWED),
+    });
+  }
+
+  // Run (execute comando permitido)
+  if (req.method === "POST" && req.url === "/run") {
+    const token = req.headers["x-agent-token"];
+    if (token !== TOKEN) {
+      return json(res, 401, { ok: false, error: "unauthorized" });
+    }
+
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", async () => {
+      let cmd = "";
+      try {
+        const parsed = JSON.parse(body || "{}");
+        cmd = String(parsed.cmd || "").trim();
+      } catch (e) {
+        return json(res, 400, { ok: false, error: "invalid_json" });
+      }
+
+      if (!cmd) return json(res, 400, { ok: false, error: "empty_cmd" });
+
+      // Bloqueia coisas perigosas comuns
+      if (/[;&|`$()<>]/.test(cmd)) {
+        return json(res, 400, {
+          ok: false,
+          error: "blocked_chars",
+          hint: "Use apenas comandos simples (ex: ls -la).",
+        });
+      }
+
+      // Whitelist
+      if (!ALLOWED.has(cmd)) {
+        return json(res, 403, {
+          ok: false,
+          error: "cmd_not_allowed",
+          cmd,
+          allowed: Array.from(ALLOWED),
+        });
+      }
+
+      const result = await runCommand(cmd);
+      return json(res, 200, { ok: true, result });
+    });
+
+    return;
+  }
+
+  return text(res, 404, "Not found");
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Backend ON: http://127.0.0.1:${PORT}`);
+  console.log(`TOKEN: ${TOKEN}`);
+  console.log(`Routes: GET /health | POST /run`);
+});
+const express = require("express");
+const { spawn } = require("child_process");
+const path = require("path");
+
+const app = express();
+app.use(express.json());
+
+const AGENT = path.join(process.env.HOME || "/data/data/com.termux/files/home", "ai-agent", "agente.sh");
+
+function run(cmd, args = [], opts = {}) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args, { ...opts, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    p.stdout.on("data", (d) => (out += d.toString()));
+    p.stderr.on("data", (d) => (err += d.toString()));
+    p.on("close", (code) => resolve({ code, out, err }));
+  });
+}
+
+// saúde
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// executa comandos do seu agente (ex: "diagnosticar", "autofix", "rodar vite", etc.)
+app.post("/agent", async (req, res) => {
+  const text = String(req.body?.text || "").trim();
+  if (!text) return res.status(400).json({ ok: false, error: "Envie { text }" });
+
+  // executa: bash ~/ai-agent/agente.sh  (passando o texto via stdin)
+  const result = await run("bash", [AGENT], {
+    env: process.env,
+    cwd: process.env.HOME,
+  });
+
+  // como o agente lê do stdin, a gente executa em modo "pipe" com spawn manual:
+  // solução simples: rodar via "bash -lc" com printf
+  // (para evitar problemas de escape, substituímos aspas)
+  const safe = text.replace(/"/g, '\\"');
+  const result2 = await run("bash", ["-lc", `printf "%s\\n" "${safe}" | bash "${AGENT}"`], {
+    env: process.env,
+    cwd: process.env.HOME,
+  });
+
+  res.json({
+    ok: result2.code === 0,
+    code: result2.code,
+    stdout: result2.out,
+    stderr: result2.err,
+  });
+});
+

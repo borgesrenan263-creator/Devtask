@@ -1,0 +1,12 @@
+{
+  "nextId": 2,
+  "tasks": [
+    {
+      "id": 1,
+      "name": "monitor",
+      "cmd": "pwd",
+      "interval": 10,
+      "autostart": true
+    }
+  ]
+}
