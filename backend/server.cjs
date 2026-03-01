@@ -20,8 +20,8 @@ const fs = require("fs");
 const app = express();
 
 // ===== Config =====
-const PORT = Number(process.env.PORT || 8787);
-const TOKEN = process.env.AGENT_TOKEN || "dev-token";
+const PORT = process.env.PORT || 8787;
+app.listen(PORT, '0.0.0.0', () => console.log('ON', PORT));
 
 // raiz do projeto (~/ai-agent por padrão)
 const ROOT = process.env.AGENT_ROOT || path.join(process.env.HOME || "", "ai-agent");
@@ -304,6 +304,6 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[backend] ON http://0.0.0.0:${PORT}`);
   console.log(`[backend] ROOT: ${ROOT}`);
-  console.log(`[backend] TOKEN: ${TOKEN}`);
+  console.log(`[backend] TOKEN: ${process.env.TOKEN || "dev-token"}`);
   logLine(`Backend ON :${PORT}`, "ok");
 });
