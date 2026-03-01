@@ -1,3 +1,0 @@
-[backend] ON http://0.0.0.0:8787
-[backend] ROOT: /data/data/com.termux/files/home/ai-agent
-[backend] TOKEN: dev-token
