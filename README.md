@@ -1,5 +1,12 @@
 # 🤖 Agente Supremo
+# 🚀 Agente Supremo
 
+![status](https://img.shields.io/badge/status-active-success)
+![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![vite](https://img.shields.io/badge/vite-frontend-purple)
+![license](https://img.shields.io/badge/license-ISC-blue)
+
+Painel inteligente para automação e diagnóstico de ambiente via Termux, com frontend em Vite e backend Node.js.
 Painel inteligente para automação de tarefas via Termux, com frontend em Vite e backend Node.js.
 
 ## 🚀 Demo Online
