@@ -1,4 +1,4 @@
-import "./src/style.css";
+import "./style.css";
 
 // 1) Preferir variável do build (Render Static)
 // 2) Se não existir, usar localhost/dev em Termux
