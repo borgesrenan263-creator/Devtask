@@ -1,0 +1,147 @@
+import express from "express";
+import cors from "cors";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
+const app = express();
+app.use(cors({ origin: "*", exposedHeaders: ["Content-Disposition"] }));
+app.use(express.json({ limit: "256kb" }));
+
+const PORT = Number(process.env.PORT || 8787);
+const ROOT = process.env.DEVTASKS_ROOT || process.cwd();
+const TOKEN = process.env.DEVTASKS_TOKEN || "dev-token";
+const HISTORY_FILE = path.join(ROOT, "history.log");
+
+// runs em memória
+const runs = new Map(); // runId -> { proc, startedAt, cmd, cwd }
+const nowISO = () => new Date().toISOString();
+
+function appendHistory(line) {
+  fs.appendFileSync(HISTORY_FILE, line + "\n", "utf8");
+}
+
+function ok(res, data) {
+  res.json({ ok: true, ...data, ts: nowISO() });
+}
+
+function bad(res, code, error, extra = {}) {
+  res.status(code).json({ ok: false, error, ...extra, ts: nowISO() });
+}
+
+app.get("/health", (req, res) => ok(res, { status: "healthy" }));
+
+app.get("/ping", (req, res) => ok(res, { pong: true }));
+
+app.get("/info", (req, res) => {
+  ok(res, {
+    root: ROOT,
+    port: PORT,
+    node: process.version,
+    hasHistory: fs.existsSync(HISTORY_FILE),
+    runs: runs.size
+  });
+});
+
+// whitelist simples (expande depois)
+const ALLOWED = new Set([
+  "pwd",
+  "ls",
+  "ls -la",
+  "node -v",
+  "npm -v",
+  "whoami",
+  "uname -a",
+  "df -h",
+  "free -h"
+]);
+
+function parseCmd(cmd) {
+  // split simples (ok p/ presets)
+  const parts = cmd.trim().split(/\s+/);
+  const bin = parts.shift();
+  return { bin, args: parts };
+}
+
+app.post("/run", (req, res) => {
+  const token = req.get("X-Token") || "";
+  if (token !== TOKEN) return bad(res, 401, "unauthorized", { hint: "invalid X-Token" });
+
+  const cmd = String(req.body?.cmd || "").trim();
+  const cwd = String(req.body?.cwd || ROOT).trim() || ROOT;
+
+  if (!cmd) return bad(res, 400, "empty_cmd");
+  if (!ALLOWED.has(cmd)) return bad(res, 403, "blocked_cmd", { cmd });
+
+  const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const { bin, args } = parseCmd(cmd);
+
+  let out = "";
+  let err = "";
+  let finished = false;
+
+  appendHistory(`[${nowISO()}] RUN ${runId} :: ${cmd}`);
+
+  const proc = spawn(bin, args, {
+    cwd,
+    shell: false
+  });
+
+  runs.set(runId, { proc, startedAt: Date.now(), cmd, cwd });
+
+  proc.stdout.on("data", (d) => { out += d.toString(); });
+  proc.stderr.on("data", (d) => { err += d.toString(); });
+
+  proc.on("close", (code, signal) => {
+    finished = true;
+    runs.delete(runId);
+    appendHistory(`[${nowISO()}] DONE ${runId} :: code=${code} signal=${signal || ""}`);
+    if (out) appendHistory(out.trimEnd());
+    if (err) appendHistory(("STDERR:\n" + err).trimEnd());
+  });
+
+  // retorna rápido + endpoint pra status depois (se quiser)
+  ok(res, { runId, started: true });
+});
+
+app.post("/stop", (req, res) => {
+  const token = req.get("X-Token") || "";
+  if (token !== TOKEN) return bad(res, 401, "unauthorized", { hint: "invalid X-Token" });
+
+  const runId = String(req.body?.runId || "").trim();
+  if (!runId) return bad(res, 400, "missing_runId");
+
+  const item = runs.get(runId);
+  if (!item) return bad(res, 404, "not_found");
+
+  try {
+    item.proc.kill("SIGTERM");
+    appendHistory(`[${nowISO()}] STOP ${runId} :: SIGTERM`);
+    ok(res, { stopped: true, runId });
+  } catch {
+    bad(res, 500, "kill_failed");
+  }
+});
+
+app.get("/history", (req, res) => {
+  if (!fs.existsSync(HISTORY_FILE)) {
+    return bad(res, 404, "no_history");
+  }
+  const content = fs.readFileSync(HISTORY_FILE, "utf8");
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="devtasks-history.log"`);
+  res.send(content);
+});
+
+app.post("/history/clear", (req, res) => {
+  const token = req.get("X-Token") || "";
+  if (token !== TOKEN) return bad(res, 401, "unauthorized", { hint: "invalid X-Token" });
+
+  fs.writeFileSync(HISTORY_FILE, "", "utf8");
+  ok(res, { cleared: true });
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("DevTasks backend on", PORT, "root:", ROOT);
+  appendHistory(`[${nowISO()}] BOOT :: backend on ${PORT} root=${ROOT}`);
+});
